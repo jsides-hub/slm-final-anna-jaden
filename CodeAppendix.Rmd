@@ -747,6 +747,23 @@ print(mse(FFS_writing_LM, val_y_writing, val_writing))
 
 ```
 
+#Test set for Best Model (Mixed Effect)
+
+```{r}
+test_mse_mixed_effect_Math <- mean((predict(mixed_effect_Math, newdata = test_math_mixed, 
+                                                  allow.new.levels = T) - test_y_math)**2)
+test_mse_mixed_effect_Writing <- mean((predict(mixed_effect_Writing, newdata = test_writing_mixed, 
+                                                  allow.new.levels = T) - test_y_writing)**2)
+
+print("Test MSE of Mixed Effect Math")
+print(test_mse_mixed_effect_Math)
+
+print("Test MSE of Mixed Effect Writing")
+print(test_mse_mixed_effect_Writing)
+```
+
+
+
 
 #Plots for dataset portion
 
