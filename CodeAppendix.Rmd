@@ -1,0 +1,775 @@
+---
+title: "JadenCleaned"
+author: "Jaden Sides"
+date: "2025-11-30"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Set up Data
+
+```{r}
+library(glmnet)
+library(tidyverse)
+library(gglasso)
+library(MASS)
+library(stats)
+```
+
+```{r}
+#Read in and clean data
+
+full_data <- read.csv("Data/full_quant.csv")
+
+set.seed(790)
+row <- nrow(full_data)
+inds <- sample(1:row, replace = FALSE)
+
+train_start <- 1
+train_end <- 0.8*row
+val_start <- train_end + 1
+val_end <- 0.9*row
+test_start <- val_end + 1
+test_end <- row
+
+predictor_df <- full_data |> mutate(SAT.Avg.Results.Mathematics....School. = NULL, 
+                                    SAT.Avg.Results.Writing....School. = NULL)
+
+Math_model_data <- full_data |> mutate(SAT.Avg.Results.Writing....School. = NULL)
+
+Writing_model_data <-full_data |> mutate(SAT.Avg.Results.Math....School. = NULL)
+
+train_math <- Math_model_data[inds[train_start:train_end],]
+val_math <- Math_model_data[inds[val_start:val_end],]
+test_math <- Math_model_data[inds[test_start:test_end],]
+
+train_writing <- Writing_model_data[inds[train_start:train_end],]
+val_writing <- Writing_model_data[inds[val_start:val_end],]
+test_writing <- Writing_model_data[inds[test_start:test_end],]
+
+train_x_matrix <- as.matrix(predictor_df[inds[train_start:train_end],])
+val_x_matrix <- as.matrix(predictor_df[inds[val_start:val_end],])
+test_x_matrix <- as.matrix(predictor_df[inds[test_start:test_end],])
+
+train_y_math <- train_math |> pull(SAT.Avg.Results.Mathematics....School.)
+val_y_math <- val_math |> pull(SAT.Avg.Results.Mathematics....School.)
+test_y_math <- test_math |> pull(SAT.Avg.Results.Mathematics....School.)
+
+train_y_writing <- train_writing |> pull(SAT.Avg.Results.Writing....School.)
+val_y_writing <- val_writing |> pull(SAT.Avg.Results.Writing....School.)
+test_y_writing <- test_writing |> pull(SAT.Avg.Results.Writing....School.)
+
+
+```
+
+
+#VIF
+
+```{r}
+
+# Do VIF
+
+all_vars <- colnames(predictor_df)
+VIF <- function(variable, other_vars){
+  other_vars <- other_vars[other_vars != variable]
+  var_formula <- reformulate(other_vars, response = variable)
+  var_model <- lm(var_formula, data= train_math)
+  var_R2 <- summary(var_model)$r.square
+  var_VIF <- 1/(1-var_R2)
+  return(var_VIF)
+}
+
+
+remaining_high_VIF <- TRUE
+remaining_vars <- all_vars
+
+while(remaining_high_VIF){
+  #compute VIFs for all vars
+  var_VIFs <- vector(length = length(remaining_vars))
+  i <- 1
+  for (var in remaining_vars){
+    var_VIFs[i] <- VIF(var, remaining_vars)
+    i <- i+1
+  }
+  #if the maximum VIF is less than 10, stop:
+  if (max(var_VIFs) < 10){
+    remaining_high_VIF <- FALSE
+  } else{
+    # get and remove the variable with the highest VIF
+    highest_VIF_var <- remaining_vars[which.max(var_VIFs)]
+    remaining_vars <- remaining_vars[remaining_vars != highest_VIF_var]
+  }
+}
+
+VIF_selected_vars <- remaining_vars
+
+
+formula_from_vars <- function(target_var, normal_variables, mixed_effect = F){
+  if (length(normal_variables) > 0) {
+    if (mixed_effect == F){
+      return( as.formula(paste(paste(target_var, " ~"), 
+                               paste(normal_variables, collapse = "+")))) 
+    } else {
+      return( as.formula(paste(paste(target_var, " ~"), 
+                               paste(normal_variables, collapse = "+"), 
+                               paste(" + (1|", mixed_effect, ")"))))
+    }
+  } else {
+    return(as.formula(paste(paste(target_var, " ~ 1"))))
+  }
+}
+
+```
+
+#Mixed Effect
+```{r}
+data_w_county <- tibble(read.csv("Data/full.csv", na.strings = "N/A"))
+colnames(data_w_county) <- make.names(colnames(data_w_county), unique = TRUE)
+
+
+data_w_county$SAT.Avg.Results.Mathematics....School.[data_w_county$SAT.Avg.Results.Mathematics....School. == 0] = NA
+data_w_county$SAT.Avg.Results.Writing....School.[data_w_county$SAT.Avg.Results.Writing....School. == 0] = NA
+
+data_w_county <- drop_na(data_w_county)
+
+#This leaves data_w_county as the same as full_data before the County column was dropped
+county_name <- data_w_county$County.Name
+
+#Split
+train_county_name <- county_name[inds[train_start:train_end]]
+val_county_name <- county_name[inds[val_start:val_end]]
+test_county_name <- county_name[inds[test_start:test_end]]
+
+train_math_mixed <- train_math
+train_math_mixed$County.Name <- train_county_name
+
+val_math_mixed <- val_math
+val_math_mixed$County.Name <- val_county_name
+
+test_math_mixed <- test_math
+test_math_mixed$County.Name <- test_county_name
+
+train_writing_mixed <- train_writing
+train_writing_mixed$County.Name <- train_county_name
+
+val_writing_mixed <- val_writing
+val_writing_mixed$County.Name <- val_county_name
+
+test_writing_mixed <- test_writing
+test_writing_mixed$County.Name <- test_county_name
+
+```
+
+
+```{r}
+
+
+library(nlme)
+mixed_effect_Math <- gls(formula_from_vars("SAT.Avg.Results.Mathematics....School.",
+                                                      VIF_selected_vars), 
+                         correlation=corCompSymm(form= ~ 1 | County.Name), 
+                         data = train_math_mixed)
+
+mixed_effect_Writing <- gls(formula_from_vars("SAT.Avg.Results.Writing....School.",
+                                                         VIF_selected_vars,
+                                                         ),
+                             correlation=corCompSymm(form= ~ 1 | County.Name), 
+                             data = train_writing_mixed)
+
+mixed_effect_Math
+mixed_effect_Writing
+```
+
+```{r}
+#allow.new.levels = T means that any counties in the val data not present in the training data will use solely the fixed effects, ie treat the mixed effect coefficients as all 0
+val_mse_mixed_effect_Math <- mean((predict(mixed_effect_Math, newdata = val_math_mixed, 
+                                                  allow.new.levels = T) - val_y_math)**2)
+val_mse_mixed_effect_Writing <- mean((predict(mixed_effect_Writing, newdata = val_writing_mixed, 
+                                                  allow.new.levels = T) - val_y_writing)**2)
+
+print("Validation MSE of Mixed Effect Math")
+print(val_mse_mixed_effect_Math)
+
+print("Validation MSE of Mixed Effect Writing")
+print(val_mse_mixed_effect_Writing)
+```
+
+
+#Significant Coefficients
+```{r}
+full_math_LM <- lm(formula = 
+                            formula_from_vars("SAT.Avg.Results.Mathematics....School.", VIF_selected_vars),
+                          data = train_math)
+
+full_writing_LM <- lm(formula = 
+                               formula_from_vars("SAT.Avg.Results.Writing....School.", VIF_selected_vars), 
+                             data = train_writing)
+```
+
+```{r}
+anova(mixed_effect_Math, full_math_LM)
+```
+
+```{r}
+anova(mixed_effect_Writing, full_writing_LM)
+```
+
+
+```{r}
+#Dictionary to make it easy to change variable names into readable versions
+
+variable_ids_to_names = c("(Intercept)" = "Intercept", 
+                          "Census.Day.Enrollment..School." = "Census Day Enrollment",
+                          "English.Learners....School." = "% English Learners",
+                          "American.Indian.or.Alaska.Native....School." = "% Native American",
+                          "Asian....School." = "% Asian",
+                          "Black.or.African.American....School." = "% Black/African American",                           "Filipino....School." = "% Filipino",
+                          "Native.Hawaiian.or.Pac.Islander....School." = "% Pacific Islander",
+                          "Two.or.More.Races....School." = "% 2+ Races",   
+                          "None.Reported....School." = "% No Reported Race",
+                          "White....School." = "% White",
+                          "Free.Reduced.Meals....School." = "% on Free/Reduced Price Meals",
+                          "Per.Pupil.Ratio..Teacher..School." = "Student Teacher Ratio",
+                          "Avg.Years.Teaching..School." = "Avg Number of Years Teaching",
+                          "Suspension.Rate..School." = "Suspension Rate",
+                          "Current.Exp.of.Educ.per.ADA..Ed.Code.41372...District." =
+                            "District Level Expenditures per Avg # of Attending Students",
+                          "Gen.Fund.Exp.by.Activity...1000.1999.Instruction.Exp....District." =
+                            "District level Instruction Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...2000.2999.Instruc.related.Svcs.Exp....District."  = "District level Instruction Related Services Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...3000.3999.Pupil.Services.Exp....District."        = "District level Pupil Services Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...4000.4999.Ancillary.Services.Exp....District."    = "District level Ancillary Services Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...5000.5999.Community.Services.Exp....District."    = "District level Community Services Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...6000.6999.Enterprise.Exp....District."  =
+                            "District level Enterprise Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...7000.7999.General.Administration.Exp....District." = "District level General Administration Expenditure %",
+                          "Gen.Fund.Exp.by.Activity...8000.8999.Plant.Services.Exp....District."        = "District level Plant Services Expenditure %",
+                          "Teacher.Salary.Avg..District." = "District level Avg Teacher Salary")
+```
+
+```{r}
+#Get adjusted P values for the two models
+math_p_vals <- summary(mixed_effect_Math)$tTable[,"p-value"]
+holm_math_p_vals <- p.adjust(math_p_vals, method = c("holm"))
+hommel_math_p_vals <- p.adjust(math_p_vals, method = c("hommel"))
+
+math_adjusted_pvals <- tibble("var" = names(math_p_vals), 
+                              "unadjusted" = math_p_vals, "holm" = holm_math_p_vals, 
+                              "hommel" = hommel_math_p_vals)
+
+
+writing_p_vals <- summary(mixed_effect_Writing)$tTable[,"p-value"]
+holm_writing_p_vals <- p.adjust(writing_p_vals, method = c("holm"))
+hommel_writing_p_vals <- p.adjust(writing_p_vals, method = c("hommel"))
+
+
+writing_adjusted_pvals <- tibble("var" =
+                                   names(writing_p_vals), 
+                                 "unadjusted" = writing_p_vals, "holm" = holm_writing_p_vals, 
+                                 "hommel" = hommel_writing_p_vals)
+
+
+math_adjusted_pvals$var <-  variable_ids_to_names[math_adjusted_pvals$var]
+writing_adjusted_pvals$var <-  variable_ids_to_names[writing_adjusted_pvals$var]
+```
+
+The Holm and Hommel methods of adjusting p-values are equivalent in which variables they deem significant at the p = 0.05 threshold. We display the selected variables and their p values below
+
+```{r}
+# Code used to verify that the Holm and Hommel methods are equivalent:
+#(math_adjusted_pvals$holm < 0.05) == (math_adjusted_pvals$hommel < 0.05)
+#(writing_adjusted_pvals$holm < 0.05) == (writing_adjusted_pvals$hommel < 0.05)
+
+significant_math_variables <- math_adjusted_pvals |> filter(math_adjusted_pvals$holm < 0.05)
+significant_writing_variables <- writing_adjusted_pvals |> filter(writing_adjusted_pvals$holm < 0.05)
+```
+
+```{r}
+print(significant_math_variables)
+
+Math_coef_confInts <- cbind(intervals(mixed_effect_Math)$coef,math_adjusted_pvals[,"holm"])
+rownames(Math_coef_confInts) <- variable_ids_to_names[rownames(Math_coef_confInts)]
+colnames(Math_coef_confInts) <- c("Lower Bound", "Estimate", "Upper Bound", "Holm Adjusted P-Value")
+
+library(knitr)
+
+knitr::kable(Math_coef_confInts[pull(significant_math_variables, 'var'),], format = "html")
+```
+
+```{r}
+print(significant_writing_variables)
+
+Writing_coef_confInts <- cbind(intervals(mixed_effect_Writing)$coef,writing_adjusted_pvals[,"holm"])
+rownames(Writing_coef_confInts) <- variable_ids_to_names[rownames(Writing_coef_confInts)]
+colnames(Writing_coef_confInts) <- c("Lower Bound", "Estimate", "Upper Bound", "Holm Adjusted P-Value")
+
+
+
+knitr::kable(Writing_coef_confInts[pull(significant_writing_variables, 'var'),], format = "html")
+```
+
+
+#Lasso (math)
+
+```{r}
+plot(glmnet(x = train_x_matrix, y = train_y_math))
+```
+
+```{r}
+cv_math <- cv.glmnet(x=train_x_matrix, y=train_y_math, nfolds=5)
+cv_math$lambda.min
+cv_math$lambda.1se
+#plot(cv_lasso)
+```
+
+```{r}
+one_se_math_model <- glmnet(x = train_x_matrix, y = train_y_math, lambda = cv_math$lambda.1se)
+coef(one_se_math_model)
+```
+
+```{r}
+one_se_math_train_preds <- predict(one_se_math_model, newx=train_x_matrix)
+one_se_math_train_mse <- mean((train_y_math-one_se_math_train_preds)^2)
+one_se_math_train_mse
+```
+```{r}
+one_se_math_val_preds <- predict(one_se_math_model, newx=val_x_matrix)
+one_se_math_val_mse <- mean((val_y_math-one_se_math_val_preds)^2)
+one_se_math_val_mse
+```
+
+```{r}
+no_se_math_model <- glmnet(x = train_x_matrix, y = train_y_math, lambda = cv_math$lambda.min)
+coef(no_se_math_model)
+```
+
+```{r}
+no_se_math_train_preds <- predict(no_se_math_model, newx=train_x_matrix, s="lambda.1se")
+no_se_math_train_mse <- mean((train_y_math-no_se_math_train_preds)^2)
+no_se_math_train_mse
+```
+```{r}
+no_se_math_val_preds <- predict(no_se_math_model, newx=val_x_matrix, s="lambda.1se")
+no_se_math_val_mse <- mean((val_y_math-no_se_math_val_preds)^2)
+no_se_math_val_mse
+```
+
+##Group Lasso (math)
+
+```{r}
+group <- c(1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10)
+exponent <- seq(from = 1, to = 11, by = .2)
+lambda = exp(exponent)
+```
+
+```{r}
+group_lasso_math_model <- gglasso(x = train_x_matrix, y = train_y_math, group = group, lambda = lambda)
+plot(group_lasso_math_model)
+```
+
+```{r}
+cv_math_group <- cv.gglasso(x = train_x_matrix, y = train_y_math, group = group, lambda = lambda)
+```
+
+```{r}
+plot(cv_math_group)
+```
+
+```{r}
+cv_math_group$lambda.1se
+cv_math_group$lambda.min
+```
+
+```{r}
+one_se_math_model_group <- gglasso(x = train_x_matrix, y = train_y_math, lambda = cv_math_group$lambda.1se)
+coef(one_se_math_model_group)
+```
+
+```{r}
+one_se_math_train_preds_group <- predict(one_se_math_model_group, newx=train_x_matrix)
+one_se_math_train_mse_group <- mean((train_y_math-one_se_math_train_preds_group)^2)
+one_se_math_train_mse_group
+```
+```{r}
+one_se_math_val_preds_group <- predict(one_se_math_model_group, newx=val_x_matrix)
+one_se_math_val_mse_group <- mean((val_y_math-one_se_math_val_preds_group)^2)
+one_se_math_val_mse_group
+```
+
+```{r}
+no_se_math_model_group <- gglasso(x = train_x_matrix, y = train_y_math, lambda = cv_math_group$lambda.min)
+coef(no_se_math_model_group)
+```
+
+```{r}
+no_se_math_train_preds_group <- predict(no_se_math_model_group, newx=train_x_matrix)
+no_se_math_train_mse_group <- mean((train_y_math-no_se_math_train_preds_group)^2)
+no_se_math_train_mse_group
+```
+
+```{r}
+no_se_math_val_preds_group <- predict(no_se_math_model_group, newx=val_x_matrix)
+no_se_math_val_mse_group <- mean((val_y_math-no_se_math_val_preds_group)^2)
+no_se_math_val_mse_group
+```
+
+```{r}
+selected_math_train <- train_math
+selected_math_train$American.Indian.or.Alaska.Native....School. <- NULL
+selected_math_train$Filipino....School. <- NULL
+selected_math_train$Native.Hawaiian.or.Pac.Islander....School. <- NULL
+selected_math_train$Two.or.More.Races....School. <- NULL
+selected_math_train$None.Reported....School. <- NULL
+selected_math_train$Per.Pupil.Ratio..Teacher..School. <- NULL
+selected_math_train$Avg.Years.Teaching..School. <- NULL
+selected_math_train$Suspension.Rate..School. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...1000.1999.Instruction.Exp....District. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...2000.2999.Instruc.related.Svcs.Exp....District. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...3000.3999.Pupil.Services.Exp....District. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...4000.4999.Ancillary.Services.Exp....District. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...5000.5999.Community.Services.Exp....District. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...7000.7999.General.Administration.Exp....District. <- NULL
+selected_math_train$Gen.Fund.Exp.by.Activity...8000.8999.Plant.Services.Exp....District. <- NULL
+```
+
+
+#Some stuff not used in paper due to space constraints (math)
+
+The linear model is mostly supported - the line plotted by residuals does have a slight positive slope. 
+```{r}
+# Testing LM on only Lasso selected variables; we ended up not discussing this in the paper
+lm_selected_math <- lm(formula = SAT.Avg.Results.Mathematics....School. ~ ., data = selected_math_train)
+lm_selected_math
+plot(lm_selected_math, which = 1)
+```
+
+
+#Linear model (math)
+
+
+
+```{r}
+mse_full_math_train <- mean((predict(full_math_LM, newdata = train_math) -
+                               train_math$SAT.Avg.Results.Mathematics....School.)^2)
+mse_full_math_train
+```
+```{r}
+mse_full_math_val <- mean((predict(full_math_LM, newdata = val_math) -
+                             val_math$SAT.Avg.Results.Mathematics....School.)^2)
+mse_full_math_val
+```
+
+#Box Cox (math)
+
+```{r}
+bc_math <- boxcox(full_math_LM)
+lam_hat_math <- bc_math$x[which.max(bc_math$y)]
+bc_model_math <- lm(formula_from_vars("I((SAT.Avg.Results.Mathematics....School.^lam_hat_math-1)/lam_hat_math)", VIF_selected_vars),
+                    data=train_math)
+plot(bc_model_math, which = 1)
+```
+
+```{r}
+mse_bc_math_train <- mean((((predict(bc_model_math, newdata = train_math))*lam_hat_math + 1)^(1/lam_hat_math) - train_math$SAT.Avg.Results.Mathematics....School.)^2)
+mse_bc_math_train
+```
+
+```{r}
+mse_bc_math_val <- mean((((predict(bc_model_math, newdata = val_math))*lam_hat_math + 1)^(1/lam_hat_math) - val_math$SAT.Avg.Results.Mathematics....School.)^2)
+mse_bc_math_val
+```
+
+#Lasso Writing
+
+```{r}
+plot(glmnet(x = train_x_matrix, y = train_y_writing))
+```
+
+```{r}
+cv_writing <- cv.glmnet(x=train_x_matrix, y=train_y_writing, nfolds=5)
+cv_writing$lambda.min
+cv_writing$lambda.1se
+#plot(cv_lasso)
+```
+
+```{r}
+one_se_writing_model <- glmnet(x = train_x_matrix, y = train_y_writing, lambda = cv_writing$lambda.1se)
+coef(one_se_writing_model)
+```
+
+```{r}
+one_se_writing_train_preds <- predict(one_se_writing_model, newx=train_x_matrix, s="lambda.1se")
+one_se_writing_train_mse <- mean((train_y_writing-one_se_writing_train_preds)^2)
+one_se_writing_train_mse
+```
+```{r}
+one_se_writing_val_preds <- predict(one_se_writing_model, newx=val_x_matrix, s="lambda.1se")
+one_se_writing_val_mse <- mean((val_y_writing-one_se_writing_val_preds)^2)
+one_se_writing_val_mse
+```
+
+```{r}
+no_se_writing_model <- glmnet(x = train_x_matrix, y = train_y_writing, lambda = cv_writing$lambda.min)
+coef(no_se_writing_model)
+```
+
+```{r}
+no_se_writing_train_preds <- predict(no_se_writing_model, newx=train_x_matrix, s="lambda.1se")
+no_se_writing_train_mse <- mean((train_y_writing-no_se_writing_train_preds)^2)
+no_se_writing_train_mse
+```
+```{r}
+no_se_writing_val_preds <- predict(no_se_writing_model, newx=val_x_matrix, s="lambda.1se")
+no_se_writing_val_mse <- mean((val_y_writing-no_se_writing_val_preds)^2)
+no_se_writing_val_mse
+```
+
+##Group Lasso (Writing)
+
+```{r}
+group <- c(1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10)
+exponent <- seq(from = 1, to = 11, by = .2)
+lambda = exp(exponent)
+```
+
+```{r}
+group_lasso_writing_model <- gglasso(x = train_x_matrix, y = train_y_writing, group = group, lambda = lambda)
+plot(group_lasso_writing_model)
+```
+
+```{r}
+cv_writing_group <- cv.gglasso(x = train_x_matrix, y = train_y_writing, group = group, lambda = lambda)
+```
+
+```{r}
+plot(cv_writing_group)
+```
+
+```{r}
+cv_writing_group$lambda.1se
+cv_writing_group$lambda.min
+```
+
+```{r}
+one_se_writing_model_group <- gglasso(x = train_x_matrix, y = train_y_writing, lambda = cv_writing_group$lambda.1se)
+coef(one_se_writing_model_group)
+```
+
+```{r}
+one_se_writing_train_preds_group <- predict(one_se_writing_model_group, newx=train_x_matrix)
+one_se_writing_train_mse_group <- mean((train_y_writing-one_se_writing_train_preds_group)^2)
+one_se_writing_train_mse_group
+```
+```{r}
+one_se_writing_val_preds_group <- predict(one_se_writing_model_group, newx=val_x_matrix)
+one_se_writing_val_mse_group <- mean((val_y_writing-one_se_writing_val_preds_group)^2)
+one_se_writing_val_mse_group
+```
+
+```{r}
+no_se_writing_model_group <- gglasso(x = train_x_matrix, y = train_y_writing, lambda = cv_writing_group$lambda.min)
+coef(no_se_writing_model_group)
+```
+
+```{r}
+no_se_writing_train_preds_group <- predict(no_se_writing_model_group, newx=train_x_matrix)
+no_se_writing_train_mse_group <- mean((train_y_writing-no_se_writing_train_preds_group)^2)
+no_se_writing_train_mse_group
+```
+
+```{r}
+no_se_writing_val_preds_group <- predict(no_se_writing_model_group, newx=val_x_matrix)
+no_se_writing_val_mse_group <- mean((val_y_writing-no_se_writing_val_preds_group)^2)
+no_se_writing_val_mse_group
+```
+
+#Stuff we ended up leaving out of the paper (Writing)
+
+```{r}
+selected_writing_train <- train_writing
+selected_writing_train$American.Indian.or.Alaska.Native....School. <- NULL
+selected_writing_train$Filipino....School. <- NULL
+selected_writing_train$Native.Hawaiian.or.Pac.Islander....School. <- NULL
+selected_writing_train$Hispanic.or.Latino....School. <- NULL
+selected_writing_train$Two.or.More.Races....School. <- NULL
+selected_writing_train$None.Reported....School. <- NULL
+selected_writing_train$Per.Pupil.Ratio..Teacher..School. <- NULL
+selected_writing_train$Avg.Years.Teaching..School. <- NULL
+selected_writing_train$Suspension.Rate..School. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...1000.1999.Instruction.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...2000.2999.Instruc.related.Svcs.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...3000.3999.Pupil.Services.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...4000.4999.Ancillary.Services.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...5000.5999.Community.Services.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...6000.6999.Enterprise.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...7000.7999.General.Administration.Exp....District. <- NULL
+selected_writing_train$Gen.Fund.Exp.by.Activity...8000.8999.Plant.Services.Exp....District. <- NULL
+```
+
+The linear model is mostly supported - the line plotted by residuals does have a slight positive slope. 
+```{r}
+lm_selected_writing <- lm(formula = SAT.Avg.Results.Writing....School. ~ ., data = selected_writing_train)
+lm_selected_writing
+plot(lm_selected_writing, which = 1)
+```
+
+
+
+
+#Box Cox (Writing)
+
+
+```{r}
+mse_full_writing_train <- mean((predict(full_writing_LM, newx = train_writing) - train_writing$SAT.Avg.Results.Writing....School.)^2)
+mse_full_writing_train
+```
+```{r}
+mse_full_writing_val <- mean((predict(full_writing_LM, newdata = val_writing) - val_writing$SAT.Avg.Results.Writing....School.)^2)
+mse_full_writing_val
+```
+
+```{r}
+bc_writing <- boxcox(full_writing_LM)
+lam_hat_writing <- bc_writing$x[which.max(bc_writing$y)]
+bc_model_writing <- lm(formula_from_vars("I((SAT.Avg.Results.Writing....School.^lam_hat_writing - 1)/lam_hat_writing)", VIF_selected_vars), data=train_writing)
+lam_hat_writing
+plot(bc_model_writing, which = 1, main = "Box-Cox Writing")
+```
+```{r}
+mse_bc_writing_train <- mean((((predict(bc_model_writing, newdata = train_writing))*lam_hat_writing + 1)^(1/lam_hat_writing) - train_writing$SAT.Avg.Results.Writing....School.)^2)
+mse_bc_writing_train
+```
+
+```{r}
+mse_bc_writing_val <- mean((((predict(bc_model_writing, newdata = val_writing))*lam_hat_writing + 1)^(1/lam_hat_writing) - val_writing$SAT.Avg.Results.Writing....School.)^2)
+mse_bc_writing_val
+```
+
+
+
+#FFS
+```{r}
+math_forward_selection <- regsubsets(x = formula_from_vars("SAT.Avg.Results.Mathematics....School.",
+                                                           VIF_selected_vars), data = train_math, 
+                                method = "forward", intercept = T, nvmax = length(VIF_selected_vars))
+plot(1:length(VIF_selected_vars), summary(math_forward_selection)$cp, xlab="Number of Predictors",
+ylab=expression(C[p]), type="b")
+
+#get the number of predictors for the model with the lowest Cp
+minCP <- which.min(summary(math_forward_selection)$cp)
+math_forward_selection_selected_variables <- names(coef(math_forward_selection, minCP))
+print(unname(variable_ids_to_names[math_forward_selection_selected_variables]))
+
+```
+
+```{r}
+writing_forward_selection <- regsubsets(x = formula_from_vars("SAT.Avg.Results.Writing....School.",
+                                                              VIF_selected_vars), data = train_writing, 
+                                method = "forward", intercept = T, nvmax = length(VIF_selected_vars))
+plot(1:length(VIF_selected_vars), summary(writing_forward_selection)$cp, xlab="Number of Predictors",
+ylab=expression(C[p]), type="b")
+
+minCP <- which.min(summary(writing_forward_selection)$cp)
+writing_forward_selection_selected_variables <- names(coef(writing_forward_selection, minCP))
+print(unname(variable_ids_to_names[writing_forward_selection_selected_variables]))
+```
+
+```{r}
+FFS_math_LM <- lm(formula = formula_from_vars("SAT.Avg.Results.Mathematics....School.", 
+                                                     math_forward_selection_selected_variables[-1]),
+                         data = train_math)
+
+FFS_writing_LM <- lm(formula = formula_from_vars("SAT.Avg.Results.Writing....School.",
+                                                        writing_forward_selection_selected_variables[-1]), 
+                            data = train_writing)
+
+mse <- function(model, target, newdata){
+  return(mean((predict(model, newdata = newdata) - target)**2))
+}
+
+
+print("FFS Var OLS Validation MSE: Math")
+print(mse(FFS_math_LM, val_y_math, val_math))
+
+
+print("FFS Var OLS Validation MSE: Writing")
+print(mse(FFS_writing_LM, val_y_writing, val_writing))
+
+```
+
+
+
+#Printed val set
+
+```{r}
+print("validation set mse measurements - math")
+print("box cox")
+mse_bc_math_val
+print("full lm")
+mse_full_math_val
+print("minimum lambda group lasso")
+no_se_math_val_mse_group
+print("minimum lambda lasso")
+no_se_math_val_mse
+print("one se lambda group lasso")
+one_se_math_val_mse_group
+print("one se lambda lasso")
+one_se_math_val_mse
+print("mixed effect model")
+print(val_mse_mixed_effect_Math)
+print("FFS model")
+print(mse(FFS_math_LM, val_y_math, val_math))
+
+```
+
+```{r}
+print("validation set mse measurements - writing")
+print("box cox")
+mse_bc_writing_val
+print("full lm")
+mse_full_writing_val
+print("minimum lambda group lasso")
+no_se_writing_val_mse_group
+print("minimum lambda lasso")
+no_se_writing_val_mse
+print("one se lambda group lasso")
+one_se_writing_val_mse_group
+print("one se lambda lasso")
+one_se_writing_val_mse
+print("mixed effect model")
+print(val_mse_mixed_effect_Writing)
+print("FFS model")
+print(mse(FFS_writing_LM, val_y_writing, val_writing))
+
+```
+
+
+#Plots for dataset portion
+
+```{r}
+library(ggplot2)
+
+p1 <- full_data |> ggplot(aes(x = SAT.Avg.Results.Mathematics....School.)) + geom_histogram() + 
+  theme_classic() + labs(x = "School Average SAT Math Score", y = "# Of Schools", title = "SAT Math")
+
+
+p2 <- full_data |> ggplot(aes(x = SAT.Avg.Results.Writing....School.)) + geom_histogram() + 
+  theme_classic() + labs(x = "School Average SAT Writing Score", y = "# Of Schools", title = "SAT Writing")
+
+library(patchwork)
+p1+p2
+```
+
+
+```{r}
+simple_math <- lm(SAT.Avg.Results.Mathematics....School. ~ ., train_math)
+simple_writing <- lm(SAT.Avg.Results.Writing....School. ~ ., train_writing)
+
+
+plot(simple_math,1, main = "SAT Math Tukey-Ascombe")
+plot(simple_writing,1,  main = "SAT Writing Tukey-Ascombe")
+```
